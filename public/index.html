@@ -33,9 +33,11 @@
       <div class="row">
         <div class="col">
           <label for="voiceName" class="form-label">声音：</label>
-          <select name="voiceName" class="form-select" onchange="updateConfigName()">
-          </select>
+          <div name="voiceName">
+          </div>
           <div class="form-text">声音列表加载可能有点慢，请耐心等待！</div>
+          <button id="testAudio_Button" type="button" class="btn btn-secondary"
+            onclick="generateTestAudio()">创建试听</button>
         </div>
       </div>
       <div class="row">
@@ -90,8 +92,14 @@
         <div style="height:20px"></div>
         <div class="row">
           <div class="col">
-            <button id="previewButton" type="button" class="btn btn-secondary" onclick="preview()">测试</button>
-            <button type="button" class="btn btn-primary" onclick='createLegadoUrl()'>生成阅读（legado）语音引擎链接</button>
+            <!-- <button id="previewButton" type="button" class="btn btn-secondary" onclick="preview()">测试</button> -->
+            <button id="previewButton" type="button" class="btn btn-secondary" onclick="preview()">生成</button>
+            <button id="stopButton" type="button" class="btn btn-secondary" onclick="stopPreview()"
+              style="display: none;">停止</button>
+            <button id="downloadButton" type="button" class="btn btn-primary" onclick="downloadAudio()"
+              disabled>下载</button>
+
+            <!-- <button type="button" class="btn btn-primary" onclick='createLegadoUrl()'>生成阅读（legado）语音引擎链接</button> -->
           </div>
         </div>
     </form>
@@ -125,39 +133,225 @@
     crossorigin="anonymous"></script>
   <script src="https://cdn.jsdelivr.net/npm/qrcode-svg@1.1.0/lib/qrcode.min.js"></script>
   <script>
+
+    // let audioBuffer; // 用于存储生成的音频数据
     let voices = [];
+    let isGenerating = false; // 标志位，表示是否正在生成语音
+    let isPlaying = false;    // 标志位，表示是否正在播放语音
+    let ctx;
+    let player;
+    let blob;
+    // let testAudios = [];
     fetch('https://speech.platform.bing.com/consumer/speech/synthesize/readaloud/voices/list?trustedclienttoken=6A5AA1D4EAFF4E9FB37E23D68491D6F4')
       .then(response => {
         if (response.status == 200) {
           return response.json();
         } else {
-          console.log(response);
           return response.text().then(text => Promise.reject(text));
         }
       }).then(data => {
         voices = data;
-        refreshVoice();
+        return refreshVoice();
       }).catch(reason => {
         alert(reason);
       });
+    function generateTestAudio() {
+      // 在试听生成开始时禁用按钮
+      updateGenerateButtonState('创建中', true, null);
+      // 遍历lable，生成试听文件
+      // 获取所有的 voiceName labels
+      let voiceLabels = document.querySelectorAll("[name='voiceName'] label");
+      let audioPromises = [];
+      // 遍历每个 label 元素
+      voiceLabels.forEach((label, index) => {
+        // 获取 label 内容
+        let labelText = label.textContent.trim();
+        let temAudioContent = "你好，我是" + labelText;
+        // console.log(temAudioContent);
+        let temVoiceName = label.querySelector("input").value;
+        // 使用方式
+        let audioPromise = generateAudio(temVoiceName, temAudioContent)
+          .then(decodedAudio => {
 
-    function refreshVoice() {
-      let voiceElelement = document.getElementsByName('voiceName')[0];
-      voiceElelement.innerHTMl = '';
-      voices.forEach(item => {
-        let option = document.createElement('option');
-        option.value = item['ShortName'];
-        option.innerText = item['FriendlyName'];
-        if (item['ShortName'] == 'zh-CN-XiaoxiaoNeural') {
-          option.selected = true;
+            label.addEventListener('mouseenter', () => {
+
+              if (decodedAudio) {
+                playAudio(decodedAudio);
+              }
+            });
+
+            // 添加鼠标移开事件监听器
+            label.addEventListener('mouseleave', () => {
+              // 在这里停止播放音频，你需要根据实际情况进行调整
+              stopPreview();
+            });
+            // 返回一个成功的消息
+            return "生成成功：" + labelText;
+          })
+          .catch(error => {
+            // 处理错误
+            console.error(error);
+            // 返回一个失败的消息
+            return "生成失败：" + labelText;
+          });
+        audioPromises.push(audioPromise);
+
+      });
+      // 等待所有音频生成的 Promise 完成
+      Promise.all(audioPromises)
+        .then(messages => {
+          // 使用 Array.every 检查是否所有试听都创建成功
+          if (messages.every(message => message.startsWith("生成成功"))) {
+            alert("所有试听创建成功");
+          } else {
+            alert("未创建成功的试听:\n" + messages.join('\n'));
+          }
+        }).finally(() => {
+          // 在 Promise 完成后恢复按钮状态
+          updateGenerateButtonState('刷新页面，重新生成', false, function () {
+            window.location.reload();
+          });
+        });;
+
+    }
+    function generateAudio(voiceName, audioTextContext) {
+      return new Promise((resolve, reject) => {
+        let headers = { 'Content-Type': 'text/plain' };
+        let voiceFormat = document.getElementsByName('voiceFormat')[0].value;
+        let token = document.getElementsByName('token')[0].value;
+        let downloadButton = document.getElementById('downloadButton');
+        let ssml = createSSML(audioTextContext, voiceName);
+
+        if (token) {
+          headers['Authorization'] = 'Bearer ' + token;
         }
-        voiceElelement.append(option)
+
+        headers['Format'] = voiceFormat;
+
+        let temCtx1 = new AudioContext();
+        fetch('/api/ra', {
+          method: 'post',
+          headers: headers,
+          body: ssml
+        }).then(response => {
+          if (response.status == 200) {
+            return response.arrayBuffer();
+          } else if (response.status == 401) {
+            throw '无效的密钥';
+          } else {
+            return response.text().then(text => Promise.reject(text));
+          }
+        }).then(arrayBuffer => {
+          // 保存生成的音频数据
+          // console.log('Original arrayBuffer length:', arrayBuffer.byteLength);
+          let temAudioBuffer = new Uint8Array(arrayBuffer);
+          // console.log("blob size", blob.size)
+
+          temCtx1.decodeAudioData(arrayBuffer, decodedAudio => {
+            resolve(decodedAudio);
+          }, error => {
+            reject(error);
+          });
+        }).catch(reason => {
+          reject(reason);
+        });
+      });
+    }
+
+    // 假设按钮的 id 是 'previewButton'
+    function updateGenerateButtonState(text, disabled, clickHandler) {
+      const button = document.getElementById('testAudio_Button');
+
+      if (button) {
+        button.textContent = text;
+        button.disabled = disabled;
+
+        // 如果提供了 clickHandler，则设置按钮点击事件
+        if (clickHandler) {
+          button.onclick = clickHandler;
+        } else {
+          // 否则，移除点击事件
+          button.onclick = null;
+        }
+      }
+    }
+
+
+
+
+    // 播放音频的函数，需要根据你的实际情况进行调整
+    function playAudio(readyAudioBuffer) {
+      // 先停止原来的播放
+      stopPreview();
+      // 在这里实现播放音频的逻辑
+      ctx = new AudioContext();
+      player = ctx.createBufferSource();
+      player.buffer = readyAudioBuffer;
+      player.connect(ctx.destination);
+      player.start(ctx.currentTime);
+    }
+
+
+
+    function getValueOrKey(map, key) {
+      // 检查是否存在给定的键
+      if (map.has(key)) {
+        // 如果存在，返回对应的值
+        return map.get(key);
+      } else {
+        // 如果不存在，返回键本身
+        return key;
+      }
+    }
+    function refreshVoice() {
+      let voiceMap = new Map([
+        ["zh-HK-HiuGaaiNeural", "粤语1"],
+        ["zh-HK-HiuMaanNeural", "粤语2"],
+        ["zh-HK-WanLungNeural", "粤语3"],
+        ["zh-CN-XiaoxiaoNeural", "晓晓"],
+        ["zh-CN-XiaoyiNeural", "晓伊"],
+        ["zh-CN-YunjianNeural", "云健"],
+        ["zh-CN-YunxiNeural", "云希"],
+        ["zh-CN-YunxiaNeural", "云霞"],
+        ["zh-CN-YunyangNeural", "云扬"],
+        ["zh-CN-liaoning-XiaobeiNeural", "晓北（东北）"],
+        ["zh-TW-HsiaoChenNeural", "晓辰（台湾）"],
+        ["zh-TW-YunJheNeural", "云杰（台湾）"],
+        ["zh-TW-HsiaoYuNeural", "晓雨（台湾）"],
+        ["zh-CN-shaanxi-XiaoniNeural", "晓妮（陕西方言）"]
+      ]);
+
+      let voiceElement = document.getElementsByName('voiceName')[0];
+      voiceElement.innerHTMl = '';
+      voices.forEach((item, index) => {
+        if (item.FriendlyName.includes('Chinese')) {
+          let label = document.createElement('label');
+          let radio = document.createElement('input');
+          radio.type = 'radio';
+          radio.name = "voiceName";
+          radio.className = 'form-radio';
+          radio.onchange = updateConfigName;
+          radio.value = item['ShortName'];
+
+          if (item['ShortName'] == 'zh-CN-XiaoxiaoNeural') {
+            radio.checked = true;
+          }
+
+          label.appendChild(radio);
+          label.appendChild(document.createTextNode(' ' + getValueOrKey(voiceMap, item['ShortName'])));
+          label.style.width = '170px';
+          if (index % 5 === 0 && index !== 0) {
+            voiceElement.appendChild(document.createElement('br')); // 换行
+          }
+          voiceElement.appendChild(label);
+
+        }
       });
       updateConfigName();
     }
 
     function updateConfigName() {
-      let voice = document.getElementsByName('voiceName')[0].value;
+      let voice = document.querySelector('input[name="voiceName"]:checked').value;
       document.getElementsByName('name')[0].value = '大声朗读（' + voice + '）';
     }
 
@@ -175,12 +369,51 @@
       return ssml;
     }
 
+
+
+    function stopPreview() {
+      if (player && ctx) {
+        player.stop();
+        ctx.close();
+      }
+
+      // 修改按钮状态为 "测试"，可点击
+      isPlaying = false;
+      updateButtonState('生成', false, preview);
+    }
+
+    // 更新按钮状态
+    function updateButtonState(text, disabled, onclick) {
+      let button = document.getElementById('previewButton');
+      let stopButton = document.getElementById('stopButton');
+
+      button.innerText = text;
+      button.disabled = disabled;
+      button.onclick = onclick;
+      stopButton.style.display = isPlaying ? 'inline-block' : 'none';
+      if (text == "生成中") {
+        let downloadButton = document.getElementById('downloadButton');
+
+        downloadButton.disabled = true;
+
+      }
+    }
+
     function preview() {
+      if (isGenerating || isPlaying) {
+        return; // 如果正在生成或播放，则不执行预览操作
+      }
+
+      isGenerating = true;
+
+      // 修改按钮状态为 "生成中"，不可点击
+      updateButtonState('生成中', true, null);
       let headers = { 'Content-Type': 'text/plain' };
-      let voiceName = document.getElementsByName('voiceName')[0].value;
+      let voiceName = document.querySelector('input[name="voiceName"]:checked').value;
       let voiceFormat = document.getElementsByName('voiceFormat')[0].value;
       let token = document.getElementsByName('token')[0].value;
       let previewText = document.getElementsByName('previewText')[0].value;
+      let downloadButton = document.getElementById('downloadButton');
       let ssml = createSSML(previewText, voiceName)
       if (token) {
         headers['Authorization'] = 'Bearer ' + token;
@@ -190,7 +423,7 @@
 
       let button = document.getElementById('previewButton');
       button.disabled = true;
-      let ctx = new AudioContext();
+      ctx = new AudioContext();
       fetch('/api/ra', {
         method: 'post',
         headers: headers,
@@ -203,39 +436,99 @@
         } else {
           return response.text().then(text => Promise.reject(text));
         }
-      }).then(arrayBuffer => ctx.decodeAudioData(arrayBuffer))
-        .then(audio => {
-          let player = ctx.createBufferSource();
-          player.buffer = audio;
-          player.connect(ctx.destination);
-          player.start(ctx.currentTime);
-        })
+      }).then(arrayBuffer => {
+        // 保存生成的音频数据
+        // console.log('Original arrayBuffer length:', arrayBuffer.byteLength);
+        // 全局变量地audioBuffer出了这个局部就没内容了，不知道原因，不深究了
+        let audioBuffer = new Uint8Array(arrayBuffer);
+        blob = new Blob([audioBuffer], { type: 'audio/wav; codecs=pcm' });
+
+        return ctx.decodeAudioData(arrayBuffer);
+      }).then(audio => {
+        player = ctx.createBufferSource();
+        player.buffer = audio;
+        player.connect(ctx.destination);
+        player.start(ctx.currentTime);
+        player.onended = function () {
+          // 播放结束后，修改按钮状态为 "测试"，可点击
+          isPlaying = false;
+          updateButtonState('生成', false, preview);
+          // console.log('playing end', blob.size);
+        };
+
+
+      })
         .catch(reason => {
           alert(reason);
         })
         .finally(() => {
-          button.disabled = false;
+          isGenerating = false;
+          updateButtonState('停止', false, stopPreview);
+          downloadButton.disabled = false;
         });
     }
-
-    function createLegadoUrl() {
-      let name = document.getElementsByName('name')[0].value;
-      let voiceName = document.getElementsByName('voiceName')[0].value;
-      let voiceFormat = document.getElementsByName('voiceFormat')[0].value;
-      let token = document.getElementsByName('token')[0].value;
-      let previewText = document.getElementsByName('previewText')[0].value;
-      let url = window.location.protocol + '//' + window.location.host + '/api/legado?api=' + encodeURIComponent(window.location.protocol + '//' + window.location.host + '/api/ra')
-        + '&name=' + encodeURIComponent(name)
-        + '&voiceName=' + encodeURIComponent(voiceName)
-        + '&voiceFormat=' + encodeURIComponent(voiceFormat)
-        + '&token=' + encodeURIComponent(token);
-      let svg = new QRCode(url).svg();
-      let modal = new bootstrap.Modal(document.getElementById('legadoUrlModal'))
-      modal.show();
-      document.getElementById('legadoUrlQRCode').innerHTML = svg;
-      document.getElementById('legadoUrl').value = url;
-      document.getElementById('legadoImportButton').href = 'legado://import/httpTTS?src=' + encodeURIComponent(url);
+    function downloadAudio() {
+      // 创建一个链接并模拟点击下载
+      const a = document.createElement('a');
+      a.href = URL.createObjectURL(blob);
+      // console.log(a.href)
+      a.download = 'generated_audio.wav'; // 设置下载文件的名称
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      // }
     }
+    // async function downloadAudio() {
+    //   if (blob) {
+    //     try {
+    //       // 使用 showSaveFilePicker 弹出文件保存框
+    //       const fileHandle = await window.showSaveFilePicker({
+    //         suggestedName: 'generated_audio.wav',
+    //         types: [{
+    //           description: 'WAV Audio File',
+    //           accept: {
+    //             'audio/wav': ['.wav'],
+    //           },
+    //         }],
+    //       });
+
+    //       // 获取写入流
+    //       const writable = await fileHandle.createWritable();
+
+    //       // 将 Blob 写入文件
+    //       await writable.write(blob);
+    //       await writable.close();
+
+    //       console.log('文件保存成功！');
+    //     } catch (error) {
+    //       console.error('文件保存失败：', error);
+    //     }
+    //   }
+    // }
+
+
+
+
+
+
+    // function createLegadoUrl() {
+    //   let name = document.getElementsByName('name')[0].value;
+    //   let voiceName = document.querySelector('input[name="voiceName"]:checked').value;
+    //   let voiceFormat = document.getElementsByName('voiceFormat')[0].value;
+    //   let token = document.getElementsByName('token')[0].value;
+    //   let previewText = document.getElementsByName('previewText')[0].value;
+    //   let url = window.location.protocol + '//' + window.location.host + '/api/legado?api=' + encodeURIComponent(window.location.protocol + '//' + window.location.host + '/api/ra')
+    //     + '&name=' + encodeURIComponent(name)
+    //     + '&voiceName=' + encodeURIComponent(voiceName)
+    //     + '&voiceFormat=' + encodeURIComponent(voiceFormat)
+    //     + '&token=' + encodeURIComponent(token);
+    //   let svg = new QRCode(url).svg();
+    //   let modal = new bootstrap.Modal(document.getElementById('legadoUrlModal'))
+    //   modal.show();
+    //   document.getElementById('legadoUrlQRCode').innerHTML = svg;
+    //   document.getElementById('legadoUrl').value = url;
+    //   document.getElementById('legadoImportButton').href = 'legado://import/httpTTS?src=' + encodeURIComponent(url);
+    // }
   </script>
 </body>
 
